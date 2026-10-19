@@ -1,0 +1,4 @@
+# Cài thêm khi cần chạy các script trong research/ (train SVM, đánh giá metrics)
+# pip install -r requirements.txt -r requirements-research.txt
+pandas==2.2.3
+matplotlib==3.9.2

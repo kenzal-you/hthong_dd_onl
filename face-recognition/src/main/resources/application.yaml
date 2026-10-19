@@ -1,0 +1,59 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/face_recognition_db?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQLDialect
+
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
+
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username:
+    password:
+
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+# JWT
+jwt:
+  secret: 3052ff0255be70d1af2d8c77325df99cd2f2f8915d5c7c1e7b1307a3f1cc12a2
+  expiration: 86400000 # 24 giờ
+
+# Logging
+logging:
+  level:
+    face_recognition: DEBUG
+    org.springframework.security: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+
+# Python Service
+face-ai:
+  base-url: http://localhost:8000
+  api-key: fa7c1e9b4d2a8f60c3b5e1d97a40826fb3c9d15e7a28f4b60c1d3e5a79b2f84c
+  timeout-seconds: 20
+
+python:
+  service:
+    url: http://localhost:8000

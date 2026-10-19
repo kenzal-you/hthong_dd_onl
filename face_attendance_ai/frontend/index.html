@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<title>Face Attendance - Thực nghiệm POC</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; background:#f6f7fb; }
+  h2 { margin-bottom: 4px; }
+  .sub { color:#666; margin-top:0; }
+  video { width: 480px; max-width: 100%; border-radius: 12px; background:#000; display:block; }
+  .overlay-canvas { position:absolute; top:0; left:0; width:100%; height:100%; border-radius:12px; pointer-events:none; background:transparent; }
+  .capture-canvas { display:none; }
+  .row { display:flex; gap:12px; align-items:center; margin:16px 0; flex-wrap:wrap; }
+  input, button { padding: 8px 14px; font-size: 14px; border-radius:8px; border:1px solid #ccc; }
+  button { background:#2563eb; color:#fff; border:none; cursor:pointer; }
+  button:disabled { background:#aaa; cursor:not-allowed; }
+  button.secondary { background:#16a34a; }
+  pre { background:#111; color:#0f0; padding:12px; border-radius:8px; overflow:auto; max-height:300px; }
+  .card { background:#fff; padding:16px; border-radius:12px; box-shadow:0 1px 4px rgba(0,0,0,.08); margin-bottom:16px;}
+  .live-name { font-size: 18px; font-weight: 600; }
+  .live-ok { color:#16a34a; }
+  .live-bad { color:#dc2626; }
+  .live-muted { color:#666; font-weight: 400; }
+</style>
+</head>
+<body>
+<div id="root">Đang tải giao diện... (nếu chữ này không biến mất, mở F12 → Console để xem lỗi)</div>
+
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+
+<script type="text/plain" id="app-source">
+const { useRef, useState, useEffect } = React;
+const API_BASE = "http://localhost:8000"; // đổi nếu backend chạy port khác
+
+const NUM_FRAMES = 12;         // số ảnh chụp burst (đăng ký / điểm danh chính thức)
+const CAPTURE_INTERVAL = 200;  // ms giữa các ảnh burst -> tổng ~2.4s
+const LIVE_POLL_INTERVAL = 700; // ms giữa các lần gọi /recognize/live (preview)
+
+function App() {
+  const videoRef = useRef(null);
+  const overlayCanvasRef = useRef(null); // canvas hiển thị khung bbox đè lên video
+  const burstCanvasRef = useRef(null);   // canvas ẩn, chỉ dùng để chụp ảnh burst
+
+  const [subjectLabel, setSubjectLabel] = useState("SV001");
+  const [status, setStatus] = useState("Đang khởi động camera...");
+  const [capturing, setCapturing] = useState(false); // đang chụp burst (đăng ký/điểm danh chính thức)
+  const [result, setResult] = useState(null);
+  const [threshold, setThreshold] = useState(0.42);
+  const [liveInfo, setLiveInfo] = useState(null); // kết quả preview liên tục từ /recognize/live
+
+  const capturingRef = useRef(false); // dùng trong interval để biết có nên tạm dừng live-poll không
+  const liveIntervalRef = useRef(null);
+
+  useEffect(() => { capturingRef.current = capturing; }, [capturing]);
+
+  // Khởi động camera 1 lần duy nhất, và bắt đầu vòng lặp preview liên tục.
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } })
+      .then(stream => {
+        videoRef.current.srcObject = stream;
+        setStatus("Camera sẵn sàng.");
+        setTimeout(syncCanvasSize, 300);
+      })
+      .catch(err => setStatus("Lỗi camera: " + err.message));
+
+    liveIntervalRef.current = setInterval(livePoll, LIVE_POLL_INTERVAL);
+    return () => clearInterval(liveIntervalRef.current);
+  }, []);
+
+  function syncCanvasSize() {
+    const video = videoRef.current;
+    const canvas = overlayCanvasRef.current;
+    if (!video || !canvas || !video.videoWidth) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+
+  // Vẽ khung bo quanh mặt + nhãn tên/similarity lên canvas đè trên video,
+  // dựa vào bbox trả về từ /recognize/live.
+  function drawOverlay(data) {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!data || !data.faceDetected || !data.bbox) return;
+
+    const { x, y, w, h } = data.bbox;
+    ctx.strokeStyle = data.recognized ? "#16a34a" : "#dc2626";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+
+    const label = data.recognized
+      ? `${data.subjectLabel} (${(data.similarity * 100).toFixed(1)}%)`
+      : "Khong nhan dien duoc";
+
+    ctx.font = "16px sans-serif";
+    const textWidth = ctx.measureText(label).width;
+    ctx.fillStyle = data.recognized ? "#16a34a" : "#dc2626";
+    ctx.fillRect(x, Math.max(0, y - 24), textWidth + 10, 24);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, x + 5, Math.max(16, y - 6));
+  }
+
+  // Preview liên tục — nhẹ, KHÔNG chạy liveness, KHÔNG dùng để điểm danh chính thức.
+  // Tự tạm dừng khi đang chụp burst (đăng ký / điểm danh chính thức) để tránh
+  // hai luồng cùng đọc video/canvas một lúc.
+  async function livePoll() {
+    if (capturingRef.current) return;
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+
+    syncCanvasSize();
+
+    const tmp = document.createElement("canvas");
+    tmp.width = video.videoWidth;
+    tmp.height = video.videoHeight;
+    tmp.getContext("2d").drawImage(video, 0, 0);
+    const frame = tmp.toDataURL("image/jpeg", 0.8);
+
+    try {
+      const res = await fetch(`${API_BASE}/recognize/live`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ frame, threshold: parseFloat(threshold) }),
+      });
+      const data = await res.json();
+      setLiveInfo(data);
+      drawOverlay(data);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function captureBurst() {
+    const video = videoRef.current;
+    const canvas = burstCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const frames = [];
+    for (let i = 0; i < NUM_FRAMES; i++) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL("image/jpeg", 0.8));
+      await new Promise(r => setTimeout(r, CAPTURE_INTERVAL));
+    }
+    return frames;
+  }
+
+  async function handleRegister() {
+    setCapturing(true);
+    setResult(null);
+    setStatus("Đang chụp burst ảnh — hãy nhìn thẳng camera và chớp mắt tự nhiên...");
+    const frames = await captureBurst();
+    setStatus("Đang gửi lên server...");
+    try {
+      const res = await fetch(`${API_BASE}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subjectLabel, frames }),
+      });
+      const data = await res.json();
+      setResult(data);
+      setStatus(data.success ? "Đăng ký thành công!" : "Đăng ký thất bại.");
+    } catch (e) {
+      setStatus("Lỗi kết nối: " + e.message);
+    }
+    setCapturing(false);
+  }
+
+  async function handleRecognize() {
+    setCapturing(true);
+    setResult(null);
+    setStatus("Đang chụp burst ảnh — hãy nhìn thẳng camera và chớp mắt tự nhiên...");
+    const frames = await captureBurst();
+    setStatus("Đang gửi lên server...");
+    try {
+      const res = await fetch(`${API_BASE}/recognize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ frames, threshold: parseFloat(threshold) }),
+      });
+      const data = await res.json();
+      setResult(data);
+      setStatus(data.recognized ? `Nhận diện: ${data.subjectLabel}` : "Không nhận diện được.");
+    } catch (e) {
+      setStatus("Lỗi kết nối: " + e.message);
+    }
+    setCapturing(false);
+  }
+
+  function renderLiveLine() {
+    if (!liveInfo) return <span className="live-muted">Đang khởi động preview...</span>;
+    if (!liveInfo.faceDetected) return <span className="live-muted">Chưa phát hiện khuôn mặt</span>;
+    if (liveInfo.recognized) {
+      return (
+        <span className="live-name live-ok">
+          {liveInfo.subjectLabel} ({(liveInfo.similarity * 100).toFixed(1)}%)
+        </span>
+      );
+    }
+    return <span className="live-name live-bad">Không nhận diện được ({(liveInfo.similarity * 100).toFixed(1)}%)</span>;
+  }
+
+  return (
+    <div>
+      <h2>🎓 Face Attendance — Thực nghiệm POC</h2>
+      <p className="sub">Backend: InsightFace (ArcFace) + MediaPipe Blink Liveness</p>
+
+      <div className="card">
+        <div style={{ position: "relative", display: "inline-block" }}>
+          <video ref={videoRef} autoPlay muted playsInline onLoadedMetadata={syncCanvasSize}></video>
+          <canvas ref={overlayCanvasRef} className="overlay-canvas"></canvas>
+        </div>
+        <canvas ref={burstCanvasRef} className="capture-canvas"></canvas>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Nhận diện trực tiếp (preview)</h3>
+        <p style={{ margin: 0 }}>{renderLiveLine()}</p>
+        <p className="sub" style={{ marginBottom: 0 }}>
+          Chỉ để xem trước — không dùng để ghi điểm danh chính thức (không chạy chống giả mạo).
+        </p>
+      </div>
+
+      <div className="card">
+        <div className="row">
+          <label>Mã sinh viên (subjectLabel):</label>
+          <input value={subjectLabel} onChange={e => setSubjectLabel(e.target.value)} />
+          <button onClick={handleRegister} disabled={capturing}>📸 Đăng ký khuôn mặt</button>
+        </div>
+        <div className="row">
+          <label>Threshold nhận diện:</label>
+          <input type="number" step="0.01" min="0" max="1" value={threshold}
+                 onChange={e => setThreshold(e.target.value)} style={{width:80}} />
+          <button className="secondary" onClick={handleRecognize} disabled={capturing}>✅ Điểm danh (nhận diện chính thức)</button>
+        </div>
+        <p><strong>Trạng thái:</strong> {status}</p>
+      </div>
+
+      {result && (
+        <div className="card">
+          <strong>Kết quả trả về:</strong>
+          <pre>{JSON.stringify(result, null, 2)}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<script>
+  const code = document.getElementById('app-source').textContent;
+  const output = Babel.transform(code, {
+    presets: [["react", { runtime: "classic" }]],
+  }).code;
+  const s = document.createElement('script');
+  s.textContent = output;
+  document.body.appendChild(s);
+</script>
+</body>
+</html>

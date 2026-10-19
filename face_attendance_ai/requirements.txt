@@ -1,0 +1,13 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+opencv-python==4.10.0.84
+numpy==1.26.4
+insightface==0.7.3
+onnxruntime==1.19.2
+mediapipe==0.10.14
+pymysql==1.1.1
+cryptography==43.0.1
+scikit-image==0.24.0
+scikit-learn==1.5.2
+joblib==1.4.2
